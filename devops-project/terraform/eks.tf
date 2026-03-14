@@ -18,7 +18,7 @@ module "eks" {
   # EKS Managed Node Groups in private subnets
   eks_managed_node_groups = {
     main = {
-      name            = "${var.project_name}-${var.environment}-node-group"
+      name            = "dev-node-group"
       instance_types  = var.node_group_instance_types
       min_size        = var.node_group_min_size
       max_size        = var.node_group_max_size
