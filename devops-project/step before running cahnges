@@ -1,0 +1,148 @@
+# How This DevOps Project Works & What to Configure
+
+## How It Works (End-to-End Flow)
+
+```
+┌─────────────────────────────────────────────────────────────────────────────────┐
+│  1. TERRAFORM (you run once)                                                     │
+│     Creates: VPC → 2 public + 2 private subnets, IGW, NAT, route tables          │
+│              EKS cluster + node group in private subnets                          │
+│              Optionally: Route53 zone + A record to ALB                          │
+└─────────────────────────────────────────────────────────────────────────────────┘
+                                        │
+                                        ▼
+┌─────────────────────────────────────────────────────────────────────────────────┐
+│  2. YOU CONFIGURE KUBECTL                                                         │
+│     aws eks update-kubeconfig --region <region> --name <cluster-name>             │
+│     (Cluster name = project_name + "-" + environment + "-eks", e.g. lms-devops-dev-eks) │
+└─────────────────────────────────────────────────────────────────────────────────┘
+                                        │
+                                        ▼
+┌─────────────────────────────────────────────────────────────────────────────────┐
+│  3. AWS LOAD BALANCER CONTROLLER (you install on EKS once)                        │
+│     Watches Ingress resources and creates an Application Load Balancer (ALB)      │
+│     in AWS. Without this, the Ingress manifest does nothing.                     │
+└─────────────────────────────────────────────────────────────────────────────────┘
+                                        │
+                                        ▼
+┌─────────────────────────────────────────────────────────────────────────────────┐
+│  4. DEPLOY APPS (Helm or kubectl)                                                │
+│     Each microservice: Deployment + Service + ConfigMap + Secret                 │
+│     Services: api-gateway, user-service, product-service (ClusterIP)             │
+└─────────────────────────────────────────────────────────────────────────────────┘
+                                        │
+                                        ▼
+┌─────────────────────────────────────────────────────────────────────────────────┐
+│  5. APPLY INGRESS                                                                │
+│     kubectl apply -f kubernetes/ingress.yaml                                      │
+│     AWS LB Controller creates ALB; routes /api, /users, /products to services   │
+└─────────────────────────────────────────────────────────────────────────────────┘
+                                        │
+                                        ▼
+┌─────────────────────────────────────────────────────────────────────────────────┐
+│  6. JENKINS (optional CI/CD)                                                      │
+│     On each run: Checkout from GitHub → Build 3 Docker images → Push to Docker Hub│
+│     → Update kubeconfig for EKS → Helm upgrade --install each service            │
+└─────────────────────────────────────────────────────────────────────────────────┘
+                                        │
+                                        ▼
+┌─────────────────────────────────────────────────────────────────────────────────┐
+│  7. ROUTE53 (optional)                                                           │
+│     After ALB exists: set alb_dns_name + alb_zone_id in Terraform → apply        │
+│     Creates A record (e.g. app.example.com → ALB)                                 │
+└─────────────────────────────────────────────────────────────────────────────────┘
+```
+
+**Summary:** Terraform provisions the network and EKS. You configure kubectl and install the AWS LB Controller. You deploy the three microservices (Helm or manifests) and apply the Ingress so the ALB is created. Jenkins can automate build-and-deploy. Route53 optionally points your domain at the ALB.
+
+---
+
+## Configuration Values You MUST Change Before Running
+
+### 1. Terraform (required to apply infra)
+
+**File:** `terraform/terraform.tfvars` (create from `terraform/terraform.tfvars.example`)
+
+| Variable | What to set | Example |
+|----------|-------------|--------|
+| `aws_region` | AWS region for VPC and EKS | `"us-east-1"` |
+| `project_name` | Prefix for resource names; also used in EKS cluster name | `"lms-devops"` or your project name |
+| `environment` | Environment suffix (dev/staging/prod); part of cluster name | `"dev"` |
+
+**EKS cluster name formula:** `{project_name}-{environment}-eks`  
+Example: `project_name = "lms-devops"`, `environment = "dev"` → cluster name **`lms-devops-dev-eks`**.
+
+**Optional but common:**
+
+| Variable | When to set |
+|----------|-------------|
+| `node_group_instance_types` | Change if you need different instance type (e.g. `["t3.small"]` to save cost). |
+| `node_group_desired_size` / `min` / `max` | Adjust node count. |
+| `create_route53_zone` | Set to `true` only if you want Terraform to create a new Route53 hosted zone. |
+| `domain_name` | Required if `create_route53_zone = true`; e.g. `"app.example.com"`. |
+| `route53_zone_id` | Use if you have an existing hosted zone (do not create one). |
+| `alb_dns_name` / `alb_zone_id` | Set **after** the Ingress has created the ALB; then run Terraform again to create the Route53 A record. |
+
+You do **not** need to change VPC CIDR or AZ count unless you have specific network or multi-AZ requirements.
+
+---
+
+### 2. Jenkins (required for the pipeline to work)
+
+**File:** `Jenkinsfile` (environment block at the top)
+
+| Variable | What to set | Example |
+|----------|-------------|--------|
+| `EKS_CLUSTER_NAME` | Must match Terraform EKS cluster name | `'lms-devops-dev-eks'` |
+| `AWS_REGION` | Same region as Terraform | `'us-east-1'` |
+| `DOCKERHUB_NAMESPACE` | Your Docker Hub username (or org) | `'myuser'` |
+
+**Jenkins credentials (create in Jenkins UI):**
+
+| Credential ID | Type | Purpose |
+|---------------|------|---------|
+| `dockerhub-credentials` | Username and password | Push images to Docker Hub |
+| `aws-eks-credentials` | AWS credentials (access key + secret) | Run `aws eks update-kubeconfig` and Helm against EKS |
+
+If your Terraform `project_name` or `environment` differ, set `EKS_CLUSTER_NAME` to whatever `terraform output eks_cluster_name` shows.
+
+---
+
+### 3. Helm / Kubernetes (optional overrides)
+
+**Files:** `helm/api-gateway/values.yaml`, `helm/user-service/values.yaml`, `helm/product-service/values.yaml`
+
+- **image.repository**  
+  Default is the service name (e.g. `api-gateway`). For Jenkins or a real registry, override when installing:
+  - `--set image.repository=your-dockerhub-username/api-gateway`
+- **image.tag**  
+  Default `latest`. Jenkins sets `--set image.tag=${BUILD_NUMBER}`.
+- **secret.***  
+  Placeholder values (e.g. `API_KEY`, `DB_PASSWORD`). Change for production (e.g. via `--set secret.API_KEY=...` or a sealed secrets / vault integration).
+
+You don’t need to edit these files for a first run; you can override at install time.
+
+---
+
+### 4. Route53 (only if you use DNS)
+
+- **New zone:** In `terraform.tfvars`, set `create_route53_zone = true` and `domain_name = "app.example.com"` (or your domain).
+- **Existing zone:** Set `route53_zone_id = "Z0XXXXXXXX"` (your hosted zone ID).
+- **ALB record:** After the Ingress has created the ALB, get its DNS name and hosted zone ID from AWS Console (EC2 → Load Balancers) or CLI, then set in `terraform.tfvars`:
+  - `alb_dns_name = "k8s-xxxxx-xxxxx.us-east-1.elb.amazonaws.com"`
+  - `alb_zone_id  = "Z35SXDOTRQ7X7K"` (example; use the ALB’s actual zone ID)
+  - Optionally `route53_record_name = "app"` (for `app.yourzone.com`) or leave blank for zone apex.
+  Then run `terraform apply` again.
+
+---
+
+## Quick Checklist Before First Run
+
+- [ ] **Terraform:** Created `terraform/terraform.tfvars` with at least `aws_region`, `project_name`, `environment`.
+- [ ] **Terraform:** Ran `terraform init` and `terraform apply`; no errors.
+- [ ] **kubectl:** Ran `aws eks update-kubeconfig --region <region> --name <cluster-name>`; `kubectl get nodes` works.
+- [ ] **AWS LB Controller:** Installed on the EKS cluster (so Ingress can create the ALB).
+- [ ] **Jenkins (if used):** Set `EKS_CLUSTER_NAME`, `AWS_REGION`, `DOCKERHUB_NAMESPACE` in `Jenkinsfile`; created `dockerhub-credentials` and `aws-eks-credentials` in Jenkins.
+- [ ] **Route53 (if used):** Set `alb_dns_name` and `alb_zone_id` after ALB exists and re-applied Terraform.
+
+Once these are set, the project is configured to run as designed.
