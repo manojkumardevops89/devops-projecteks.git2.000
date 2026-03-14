@@ -17,21 +17,23 @@ module "eks" {
 
   # EKS Managed Node Groups in private subnets
   eks_managed_node_groups = {
-    main = {
-      name            = "dev-node-group"
-      instance_types  = var.node_group_instance_types
-      min_size        = var.node_group_min_size
-      max_size        = var.node_group_max_size
-      desired_size    = var.node_group_desired_size
+  main = {
+    name            = "${var.project_name}-${var.environment}-node-group"
+    instance_types  = var.node_group_instance_types
 
-      subnet_ids = module.vpc.private_subnets
+    min_size     = var.node_group_min_size
+    max_size     = var.node_group_max_size
+    desired_size = var.node_group_desired_size
 
-      tags = {
-        Name = "${var.project_name}-${var.environment}-nodes"
-      }
+    subnet_ids = module.vpc.private_subnets
+
+    version = var.eks_cluster_version   
+
+    tags = {
+      Name = "${var.project_name}-${var.environment}-nodes"
     }
   }
-
+}
   tags = {
     Name = local.cluster_name
   }
